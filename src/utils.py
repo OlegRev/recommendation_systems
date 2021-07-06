@@ -100,14 +100,14 @@ def user_feature_engineering(data, user_features, USER_COL='user_id', ITEM_COL='
     n_factors = recommender.model.factors
     ind = list(recommender.id_to_itemid.values())
     df = pd.DataFrame(df, index=ind).reset_index()
-    df.columns = ['item_id'] + ['factor_' + str(i + 1) for i in range(n_factors)]
+    df.columns = [ITEM_COL] + [f'factor_{str(i + 1)}' for i in range(n_factors)]
     user_item_features = user_item_features.merge(df, on=['item_id'])
     
     # эмбеддинги пользователей
     df = recommender.model.user_factors
     ind = list(recommender.id_to_userid.values())
     df = pd.DataFrame(df, index=ind).reset_index()
-    df.columns = ['user_id'] + ['user_factor_' + str(i + 1) for i in range(n_factors)]
+    df.columns = [USER_COL] + [f'user_factor_{str(i + 1)}' for i in range(n_factors)]
     user_item_features = user_item_features.merge(df, on=['user_id'])
     
     return user_features
@@ -156,6 +156,20 @@ def get_replace_dict(re_list):
                 replace_dict[itm] = round(int(strip_itm.split(' ')[1]) - (numerator/denominator)/5)
     return replace_dict
 
+
+def set_frequency_rank_coding(df, feature_names: list or str, frequency=True):
+    if type(feature_names) is str:
+        feature_names = [feature_names]
+    for feature_name in feature_names:
+        feature_vcount = df[feature_name].value_counts()
+        feature_vcount_idx_list = feature_vcount.index.tolist()
+        
+        new_name = f'{feature_name}_freq' if frequency else f'{feature_name}_rank'
+        
+        for idx, itm in enumerate(feature_vcount_idx_list):
+            df.loc[df[feature_name] == itm, new_name] = feature_vcount[itm] if frequency else idx
+
+    return df
 
 def get_candidates():
     pass
