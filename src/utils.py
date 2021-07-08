@@ -2,6 +2,9 @@ import pandas as pd
 import numpy as np
 from src.recommenders import MainRecommender
 
+USER_COL='user_id'
+ITEM_COL='item_id'
+
 def prefilter_items(data, take_n_popular=5000, users_features=None, item_features=None):
     # Уберем не интересные для рекоммендаций категории (department)
     if item_features is not None:
@@ -36,36 +39,7 @@ def prefilter_items(data, take_n_popular=5000, users_features=None, item_feature
     return data
 
 
-def preparing_data(data_train_ranker, item_features, user_features, USER_COL='user_id', ITEM_COL='item_id', N_PREDICT=50):
-    # взяли пользователей из трейна для ранжирования
-    df_match_candidates = pd.DataFrame(data_train_ranker[USER_COL].unique())
-    df_match_candidates.columns = [USER_COL]
-    
-    # собираем кандитатов с первого этапа (matcher)
-    recommender = MainRecommender(data_train_matcher)
-    df_match_candidates['candidates'] = df_match_candidates[USER_COL].apply(lambda x: recommender.get_own_recommendations(x, N=N_PREDICT))
-    
-    df_items = df_match_candidates.apply(lambda x: pd.Series(x['candidates']), axis=1).stack().reset_index(level=1, drop=True)
-    df_items.name = ITEM_COL
-    df_match_candidates = df_match_candidates.drop('candidates', axis=1).join(df_items)
-    
-    df_ranker_train = data_train_ranker[[USER_COL, ITEM_COL]].copy()
-    df_ranker_train['target'] = 1 
-    
-    df_ranker_train = df_match_candidates.merge(df_ranker_train, on=[USER_COL, ITEM_COL], how='left')
-    
-    df_ranker_train['target'].fillna(0, inplace= True)
-    
-    df_ranker_train = df_ranker_train.merge(item_features, on='item_id', how='left')
-    df_ranker_train = df_ranker_train.merge(user_features, on='user_id', how='left')
-    
-    X_train = df_ranker_train.drop('target', axis=1)
-    y_train = df_ranker_train[['target']]
-    
-    return X_train, y_train
-
-
-def set_user_item_features(data, USER_COL='user_id', ITEM_COL='item_id'):
+def set_user_item_features(data):
     df = data.copy()
     df['hour_t'] = df.trans_time // 100
     user_item_features = df.groupby(by=[USER_COL, ITEM_COL]).agg('hour_t').median().rename('median_hour_transactions').reset_index()
@@ -173,8 +147,89 @@ def set_frequency_rank_coding(df, feature_names: list or str, frequency=True):
 
     return df
 
-def get_candidates():
-    pass
+
+def get_candidates(data_train_matcher, data_train_ranker, N_PREDICT, add_to_ranker):
+    
+    recommender = MainRecommender(data_train_matcher)
+    
+    users_matcher = data_train_matcher[USER_COL].values
+    users_ranker = data_train_ranker[USER_COL].values
+    if add_to_ranker:
+        users_ranker += add_to_ranker
+    
+    current_users = list(set(users_matcher)&set(users_ranker))
+    new_users = list(set(users_ranker) - set(users_matcher))
+    
+    df = pd.DataFrame(users_ranker, columns=[USER_COL])
+    df_match_candidates = df[USER_COL].isin(current_users)
+    df.loc[df_match_candidates, 'candidates'] = df.loc[df_match_candidates, USER_COL].apply(lambda x: recommender.get_own_recommendations(x, N=N_PREDICT))
+    
+    if new_users:
+        df_ranker_candidates = df[USER_COL].isin(new_users)
+        df.loc[df_ranker_candidates, 'candidates'] = df.loc[df_ranker_candidates, USER_COL].apply(lambda x: recommender.overall_top_purchases[:N_PREDICT])
+        
+    return df
+
+
+def get_target_ranker(data_train_matcher, data_train_ranker, item_features, user_features, user_item_features, N_PREDICT, add_to_ranker=None):
+    
+    users_ranker = get_candidates(data_train_matcher, data_train_ranker, N_PREDICT, add_to_ranker)
+    
+    df = pd.DataFrame({USER_COL: users_ranker[USER_COL].values.repeat(N_PREDICT),
+                      ITEM_COL: np.concatenate(users_ranker['candidates'].values)
+                      })
+    df_ranker_train = data_train_ranker[[USER_COL, ITEM_COL]].copy()
+    df_ranker_train['target'] = 1  # тут только покупки 
+
+    df_ranker_train = df.merge(df_ranker_train, on=[USER_COL, ITEM_COL], how='left')
+    df_ranker_train['target'].fillna(0, inplace= True)
+    
+    df_ranker_train = df_ranker_train.merge(item_features, on=ITEM_COL, how='left')
+    df_ranker_train = df_ranker_train.merge(user_features, on=ITEM_COL, how='left')
+    df_ranker_train = df_ranker_train.merge(user_item_features, on=[USER_COL, ITEM_COL], how='left')
+    
+    return df_ranker_train
+
+
+def preparing_data(data_train_matcher, data_train_ranker, data_val_matcher, data_val_ranker, item_features, user_features, user_item_features, USER_COL='user_id', ITEM_COL='item_id', N_PREDICT=50):
+    # ищем общих пользователей
+    common_users = list(set(data_train_matcher.user_id.values)&(set(data_val_matcher.user_id.values))&set(data_val_ranker.user_id.values))
+
+    # оставляем общих пользователей
+    data_train_matcher = data_train_matcher[data_train_matcher.user_id.isin(common_users)]
+    data_val_matcher = data_val_matcher[data_val_matcher.user_id.isin(common_users)]
+    data_train_ranker = data_train_ranker[data_train_ranker.user_id.isin(common_users)]
+    data_val_ranker = data_val_ranker[data_val_ranker.user_id.isin(common_users)]
+    
+    
+    # взяли пользователей из трейна для ранжирования
+    recommender = MainRecommender(data_train_matcher)
+    
+    df_match_candidates = pd.DataFrame(data_train_ranker[USER_COL].unique())
+    df_match_candidates.columns = [USER_COL]
+    # собираем кандитатов с первого этапа (matcher)
+    df_match_candidates['candidates'] = df_match_candidates[USER_COL].apply(lambda x: recommender.get_own_recommendations(x, N=N_PREDICT))
+    
+    df_items = df_match_candidates.apply(lambda x: pd.Series(x['candidates']), axis=1).stack().reset_index(level=1, drop=True)
+    df_items.name = ITEM_COL
+    df_match_candidates = df_match_candidates.drop('candidates', axis=1).join(df_items)
+    
+    df_ranker_train = data_train_ranker[[USER_COL, ITEM_COL]].copy()
+    df_ranker_train['target'] = 1  # тут только покупки 
+    
+    df_ranker_train = df_match_candidates.merge(df_ranker_train, on=[USER_COL, ITEM_COL], how='left')
+    
+    df_ranker_train['target'].fillna(0, inplace= True)
+    
+    df_ranker_train = df_ranker_train.merge(item_features, on=ITEM_COL, how='left')
+    df_ranker_train = df_ranker_train.merge(user_features, on=USER_COL, how='left')
+    
+    df_ranker_train = df_ranker_train.merge(user_item_features, on=[USER_COL, ITEM_COL], how='left')
+    
+    X_train = df_ranker_train.drop('target', axis=1)
+    y_train = df_ranker_train[['target']]
+    
+    return X_train, y_train
 
 
 def postfilter_items(user_id, recommednations):
