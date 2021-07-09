@@ -39,7 +39,97 @@ def prefilter_items(data, take_n_popular=5000, users_features=None, item_feature
     return data
 
 
+# ______________________________
+def get_user_item_features(data_train_lvl_1, user_features, item_features):
+    # час совершения транзакции
+    X = data_train_lvl_1.copy()
+    X['hour'] = X['trans_time'] // 100
+    user_item_features = X.groupby(['user_id', 'item_id'])['hour'].median().reset_index()
+    user_item_features.columns = ['user_id', 'item_id', 'median_sales_hour']
+    
+    # день недели совершения транзакции
+    X['weekday'] = X['day'] % 7
+    df = X.groupby(['user_id', 'item_id'])['weekday'].median().reset_index()
+    df.columns = ['user_id', 'item_id', 'median_weekday']
+    user_item_features = user_item_features.merge(df, on=['user_id', 'item_id'])
+    
+    # cреднее кол-во дней между покупками
+    df = X.groupby('user_id')['day'].nunique().reset_index()
+    df['mean_visits_interval'] = (X.groupby('user_id')['day'].max() - X.groupby('user_id')['day'].min()) / df['day']
+    user_item_features = user_item_features.merge(df[['user_id', 'mean_visits_interval']], on=['user_id'])
+    
+    # средний чек корзины клиента
+    df = X.groupby(['user_id', 'basket_id'])['sales_value'].sum().reset_index()
+    df = df.groupby('user_id')['sales_value'].mean().reset_index()
+    df.columns = ['user_id', 'mean_check']
+    user_item_features = user_item_features.merge(df, on=['user_id'])
+    
+    # кол-во магазинов, в которых продавался товар
+    df = X.groupby(['item_id'])['store_id'].nunique().reset_index()
+    df.columns = ['item_id', 'n_stores']
+    user_item_features = user_item_features.merge(df, on=['item_id'])
+    
+    # кол-во уникальных товаров, купленных клиентом
+    df = X.groupby(['user_id'])['item_id'].nunique().reset_index()
+    df.columns = ['user_id', 'n_items']
+    user_item_features = user_item_features.merge(df, on=['user_id'])
+    
+    # кол-во транзакций клиента
+    df = X.groupby(['user_id'])['item_id'].count().reset_index()
+    df.columns = ['user_id', 'n_transactions']
+    user_item_features = user_item_features.merge(df, on=['user_id'])
+    
+    # mean / max / std кол-ва уникальных товаров в корзине клиента
+    df = X.groupby(['user_id', 'basket_id'])['item_id'].nunique().reset_index()
+    df1 = df.groupby('user_id')['item_id'].mean().reset_index()
+    df1.columns = ['user_id', 'mean_n_items_basket']
+    user_item_features = user_item_features.merge(df1, on=['user_id'])
+
+    df2 = df.groupby('user_id')['item_id'].max().reset_index()
+    df2.columns = ['user_id', 'max_n_items_basket']
+    user_item_features = user_item_features.merge(df2, on=['user_id'])
+
+    df3 = df.groupby('user_id')['item_id'].std().reset_index()
+    df3.columns = ['user_id', 'std_n_items_basket']
+    user_item_features = user_item_features.merge(df3, on=['user_id'])
+    
+    # mean / max / std кол-ва уникальных категорий в корзине клиента
+    X = X.merge(item_features[['item_id', 'commodity_desc']], on=['item_id'])
+    df = X.groupby(['user_id', 'basket_id'])['commodity_desc'].nunique().reset_index()
+    df1 = df.groupby('user_id')['commodity_desc'].mean().reset_index()
+    df1.columns = ['user_id', 'mean_n_item_categories_basket']
+    user_item_features = user_item_features.merge(df1, on=['user_id'])
+
+    df2 = df.groupby('user_id')['commodity_desc'].max().reset_index()
+    df2.columns = ['user_id', 'max_n_item_categories_basket']
+    user_item_features = user_item_features.merge(df2, on=['user_id'])
+
+    df3 = df.groupby('user_id')['commodity_desc'].std().reset_index()
+    df3.columns = ['user_id', 'std_n_item_categories_basket']
+    user_item_features = user_item_features.merge(df3, on=['user_id'])
+    
+    # эмбеддинги товаров
+    recommender = MainRecommender(X)
+    df = recommender.model.item_factors
+    n_factors = recommender.model.factors
+    ind = list(recommender.id_to_itemid.values())
+    df = pd.DataFrame(df, index=ind).reset_index()
+    df.columns = ['item_id'] + ['factor_' + str(i + 1) for i in range(n_factors)]
+    user_item_features = user_item_features.merge(df, on=['item_id'])
+    
+    # эмбеддинги пользователей
+    df = recommender.model.user_factors
+    ind = list(recommender.id_to_userid.values())
+    df = pd.DataFrame(df, index=ind).reset_index()
+    df.columns = ['user_id'] + ['user_factor_' + str(i + 1) for i in range(n_factors)]
+    user_item_features = user_item_features.merge(df, on=['user_id'])
+    
+    return user_item_features
+# ________________
+
+
 def set_user_item_features(data):
+    
     df = data.copy()
     df['hour_t'] = df.trans_time // 100
     user_item_features = df.groupby(by=[USER_COL, ITEM_COL]).agg('hour_t').median().rename('median_hour_transactions').reset_index()
@@ -185,13 +275,13 @@ def get_target_ranker(data_train_matcher, data_train_ranker, item_features, user
     df_ranker_train['target'].fillna(0, inplace= True)
     
     df_ranker_train = df_ranker_train.merge(item_features, on=ITEM_COL, how='left')
-    df_ranker_train = df_ranker_train.merge(user_features, on=ITEM_COL, how='left')
+    df_ranker_train = df_ranker_train.merge(user_features, on=USER_COL, how='left')
     df_ranker_train = df_ranker_train.merge(user_item_features, on=[USER_COL, ITEM_COL], how='left')
     
     return df_ranker_train
 
 
-def preparing_data(data_train_matcher, data_train_ranker, data_val_matcher, data_val_ranker, item_features, user_features, user_item_features, USER_COL='user_id', ITEM_COL='item_id', N_PREDICT=50):
+def set_warm_start(data_train_matcher, data_val_matcher, data_train_ranker, data_val_ranker):
     # ищем общих пользователей
     common_users = list(set(data_train_matcher.user_id.values)&(set(data_val_matcher.user_id.values))&set(data_val_ranker.user_id.values))
 
@@ -200,6 +290,10 @@ def preparing_data(data_train_matcher, data_train_ranker, data_val_matcher, data
     data_val_matcher = data_val_matcher[data_val_matcher.user_id.isin(common_users)]
     data_train_ranker = data_train_ranker[data_train_ranker.user_id.isin(common_users)]
     data_val_ranker = data_val_ranker[data_val_ranker.user_id.isin(common_users)]
+    
+    return data_train_matcher, data_val_matcher, data_train_ranker, data_val_ranker
+
+def preparing_data(data_train_matcher, data_train_ranker, item_features, user_features, user_item_features, USER_COL='user_id', ITEM_COL='item_id', N_PREDICT=50, get_df=True):
     
     
     # взяли пользователей из трейна для ранжирования
@@ -228,8 +322,10 @@ def preparing_data(data_train_matcher, data_train_ranker, data_val_matcher, data
     
     X_train = df_ranker_train.drop('target', axis=1)
     y_train = df_ranker_train[['target']]
-    
-    return X_train, y_train
+    if get_df:
+        return df_ranker_train
+    else:
+        return X_train, y_train
 
 
 def postfilter_items(user_id, recommednations):
